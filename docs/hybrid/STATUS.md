@@ -38,7 +38,7 @@
 | P2 | Run coach (prompts, 6 change types, payload, aggregates) | ✅ backend done |
 | P2b | Frontend `views/Run.jsx`, `RunWorkout.jsx`, client expander (`run-expand.js`) | ✅ done, deployed |
 | P3 | Interference engine (blocking, 50 % threshold) | ✅ done |
-| P4 | Feedback loop over both disciplines | ⬜ open — next |
+| P4 | Feedback loop over both disciplines | ✅ done, deployed, verified live |
 | P5 | Rebase discipline, CI rebase smoke test | ⬜ open |
 | G | Garmin G2 sidecar | 🟡 ADR done, credential store built |
 | — | **Backup chain fix** (unplanned, found during Phase G prep) | ✅ done, verified |
@@ -65,8 +65,31 @@ none watching the outcome.
 
 ## Test state
 
-- API suite: `npm test` → **231 pass, 0 fail**
-- Frontend suite: **1631 pass, 0 fail** (incl. client run mirror + parity test vs server `CHANGE_TYPES`)
+- API suite: `npm test` → **245 pass, 0 fail** (was 231; +14 run-feedback/interference tests)
+- Frontend suite: **1631 pass, 0 fail**
+
+## Critical bug found & fixed in Phase 4 (2026-09-15)
+
+The whole hybrid feature was a silent no-op, found by writing the Phase 4 tests:
+
+1. **`LEG_GROUPS` used invented body-part names** (`'quads'`, `'hamstrings'`, `'glutes'`,
+   `'calves'`, `'legs'`) that appear nowhere in the exercise library, which ships
+   `"upper legs"` / `"lower legs"`. `isLegDay` returned false for an obvious squat routine,
+   so the blocking interference rules Linus asked for **blocked nothing**. Fixed in
+   `interference.js` + client mirror `run-interference.js` + `payload.js`.
+2. **`legDayProximity` never fired**: the detector returned weekday numbers but the comparison
+   fed them to a date-differencing helper → `NaN < 2` = always false. Rewrote as
+   `nearestLegDayGap` over the weekly pattern.
+
+Both are now pinned against the shipped library (`run-interference.test.js` imports the real
+`LIBRARY` and asserts the names match) so the mismatch cannot silently return.
+
+New Phase 4 surface in `aggregates.run`: `legDayProximity` (working), `legVolumeConflicts`
+(x0.75 cap at ≥2 quality runs/week), `legDayWeekdays`. `hybrid.md` prompt now tells the model
+how to read these and to propose strength + running changes in one set.
+
+**Verified live** on the test instance: with a leg-heavy Monday routine + Tuesday long run,
+the payload reports `legDayProximity: [{d:"2026-09-22",type:"long",daysFromLegDay:1}]`.
 
 ## Traefik file provider for the test subdomain (ADR-003)
 
@@ -148,10 +171,5 @@ not just Garmin. That addresses the recurring "you lose things often" pattern st
 
 ## Next
 
-**P4 — feedback loop over both disciplines:** extend `aggregates.run` (week km, compliance, pace
-trend, zone distribution, 80/20 check) and the cross-signal `legDayProximity`, so the review prompt
-can propose strength **and** running changes in one set. Exit criterion: a review that spots
-"intervals missed 3× and bench stalled, long run 20 h after leg day" and fixes both at once.
-
-Then **P5** (rebase discipline + CI smoke test), then **Phase G** (Garmin G2 sidecar — ADR-002 and
-the token store are ready, the sidecar itself is next).
+**P5 — rebase discipline + CI smoke test**, then **Phase G — Garmin G2 sidecar** (ADR-002 and
+the durable token store are ready; the sidecar itself is next). P4 (feedback loop) is done.
