@@ -56,6 +56,17 @@ The app checks these rules and **refuses** proposals that break them. They are n
 
 `crossTraining` and non-running days are how a week is made to fit. If the strength days and the running days genuinely cannot be reconciled — the person trains four days and wants five runs — say so in `summary` and propose the closest week that works rather than one that breaks the rules.
 
+### Read the running aggregate before you propose
+
+The payload carries, alongside the plan, an `aggregates.run` block that tells you what actually happened, not what was planned:
+
+- `compliancePct` — planned sessions against sessions actually ticked or synced. A week that keeps falling short is a volume problem, not a motivation problem: bring the target down before the person quits.
+- `paceTrend` — the paces the person actually ran, oldest first. An easy pace that is *falling at the same heart rate* is the clearest evidence a block is working; a pace that stalls while volume climbs is the clearest evidence it is not.
+- `legDayProximity` — every long run and quality session that sits too close to a leg day, with how many days apart it is. When this is non-empty, the plan has drifted since it was built (the person moved a lift by hand) and **you** are the one who puts it back — this is the reason the hybrid coach exists.
+- `legVolumeConflicts` — weeks with two or more quality runs that still carry full leg volume. The strength and the running are both pushing the same tissue; propose the leg work come down rather than the running.
+
+Propose strength and running changes **in one set** when one is the cause of the other. A review that moves Tuesday's squats but leaves Thursday's long run 20 hours after them has not fixed the plan, it has renamed the problem.
+
 ## Output — running only
 
 For running proposals, answer with `runChanges` instead of `changes`. `changes` is the strength plan and `runChanges` is the running plan; a review may carry both, and that is the point of a hybrid coach — one answer that adjusts Thursday's intervals **and** moves Tuesday's squats, because each is the reason for the other.
