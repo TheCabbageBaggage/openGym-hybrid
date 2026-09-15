@@ -18,6 +18,11 @@ import { uid, todayISO, DAYN } from './format.js'
 import { mergePlan } from './plan-share.js'
 import { POLICIES } from './progression.js'
 import { t } from './i18n.js'
+// HYBRID: the running half. These are inert unless a proposal actually carries run changes or a
+// created plan carries a `runPlan`, so a profile with no running is unaffected by the import.
+import { RUN_CHANGE_APPLY, RUN_CHANGE_TYPES, applyRunChanges, markRunStale } from './run-apply.js'
+import { expandRunPlan, normalizeRunPlan } from './run-expand.js'
+import { ensureRun, hasRun, validateRun, cleanRun } from './run-model.js'
 
 // Bumping this re-prompts everyone: it means what we share, or who we share it with, changed.
 export const CONSENT_VERSION = 1
@@ -182,7 +187,10 @@ export function markStale(proposal, S) {
     }
     return { ...c, status: stale ? 'stale' : (c.status === 'stale' ? 'proposed' : c.status || 'proposed') }
   })
-  return { ...proposal, planMoved, changes }
+  // HYBRID: the running half goes through the same two checks, on its own model. A proposal with
+  // no running changes is returned untouched, so this costs a strength-only review nothing.
+  const withRun = markRunStale({ ...proposal, changes }, S.run)
+  return { ...withRun, planMoved, changes }
 }
 export const applicable = proposal => (proposal?.changes || []).filter(c => c.status !== 'stale')
 
@@ -198,11 +206,19 @@ export function validateProposal(p) {
     for (const r of p.bundle.routines) {
       if (!Array.isArray(r.ex) || !r.ex.length) throw new Error(t('That proposal can’t be read.'))
     }
+    // HYBRID: a plan may carry a running half. The server already validated the shape; this only
+    // refuses one so malformed that the expander could not turn it into sessions — better a
+    // refused proposal than an applied one whose running week is empty.
+    if (p.runPlan != null && !normalizeRunPlan(p.runPlan)) throw new Error(t('That proposal can’t be read.'))
     return true
   }
   if (!Array.isArray(p.changes)) throw new Error(t('That proposal can’t be read.'))
   for (const c of p.changes) {
     if (!CHANGE_APPLY[c.type]) throw new Error(t('That proposal can’t be read.'))
+  }
+  // HYBRID: same gate for the running half — the types are the closed list on this side of the wire.
+  for (const c of (p.runChanges?.changes || [])) {
+    if (!RUN_CHANGE_APPLY[c.type]) throw new Error(t('That proposal can’t be read.'))
   }
   return true
 }
@@ -241,13 +257,22 @@ function sweepDayPlan(s, fromIso) {
   recordDayPlanDrops(s, dropped)
 }
 
-/** Snapshot `{routines, week}` before touching either. The unit of revert (FR-30/31). */
+/**
+ * Snapshot the plan before touching it. The unit of revert (FR-30/31).
+ *
+ * HYBRID: `run` is captured alongside `routines` and `week`. Without it a revert would put the
+ * lifting plan back and leave the running plan changed — a half-reverted plan is worse than an
+ * unreverted one, because it looks like the undo worked. `run` is copied only when it exists, so
+ * a strength-only profile's snapshot stays byte-identical to before this feature.
+ */
 export function pushSnapshot(s, proposalId, label) {
   const c = coachOf(s)
-  c.snapshots = [...(c.snapshots || []), {
+  const snap = {
     at: Date.now(), proposalId: proposalId || null, label: label || '',
     routines: clone(s.routines || []), week: clone(s.week || {})
-  }].slice(-SNAPSHOT_MAX)
+  }
+  if (s.run) snap.run = clone(s.run)
+  c.snapshots = [...(c.snapshots || []), snap].slice(-SNAPSHOT_MAX)
   trim(s)
 }
 
@@ -264,6 +289,13 @@ export function revertLast(s) {
   if (!snap) return false
   s.routines = clone(snap.routines)
   s.week = clone(snap.week)
+  // HYBRID: the running plan comes back with the lifting plan. A snapshot taken before this
+  // field existed carries no `run` key and a profile without running has nothing to restore —
+  // in both cases the plan is left exactly as it is, which is the correct answer either way.
+  if ('run' in snap) {
+    if (snap.run) s.run = clone(snap.run)
+    else delete s.run
+  }
   // Snapshots taken before this field existed have nothing to put back.
   if (snap.dayPlanRestore) Object.assign(s.dayPlan, snap.dayPlanRestore)
   appendLog(s, { kind: 'revert', at: Date.now(), proposalId: snap.proposalId, summary: t('Reverted the last Coach changes.') })
@@ -392,12 +424,25 @@ export function applyCreatedPlan(s, proposal, { schedule } = {}) {
   // Only when the week actually moved — with the switch off the old schedule still stands, and
   // so do the reschedules made against it.
   if (schedule) sweepDayPlan(s, todayISO())
+  // HYBRID: expand the running half, if the Coach prescribed one. `expandRunPlan` writes the
+  // whole `s.run` namespace; the conflict report rides back so the UI can surface it without a
+  // second pass over the plan. A proposal without `runPlan` is a strength-only plan and leaves
+  // `s.run` exactly as it was — an existing running plan is not silently destroyed by a
+  // strength-only answer.
+  let runRes = null
+  if (proposal.runPlan != null) {
+    const expanded = expandRunPlan(proposal.runPlan, { S: s })
+    if (expanded) {
+      s.run = expanded.run
+      runRes = { weeks: expanded.run.weeks.length, conflicts: expanded.conflicts, provisional: !expanded.run.zones?.thresholdPace }
+    }
+  }
   res.logId = appendLog(s, {
     kind: 'create', at: Date.now(), proposalId: proposal.id,
     summary: proposal.summary || '', routines: res.routines, iteration: proposal.iteration || 1,
-    bundle: lightBundle(bundle), scheduled: !!schedule
+    bundle: lightBundle(bundle), scheduled: !!schedule, run: runRes
   })
-  return res
+  return { ...res, run: runRes }
 }
 
 /* ============================ applying a change-set ============================ */
@@ -523,7 +568,15 @@ const CHANGE_APPLY = {
     const d = c.target.weekday
     if (c.after == null || c.after === 'rest') delete s.week[d]
     else s.week[d] = [c.after]
-  }
+  },
+  // HYBRID: the six running types, appended as one contiguous block so a rebase can find them.
+  // They delegate to run-apply.js rather than carrying their own bodies: the running plan has
+  // its own model, its own bounds and its own tests, and a second implementation here is how the
+  // two halves of one plan start disagreeing. `s.run` is created on demand — a strength-only
+  // profile that somehow receives a run change gets a plan rather than a TypeError.
+  ...Object.fromEntries(
+    Object.entries(RUN_CHANGE_APPLY).map(([type, fn]) => [type, (s, c) => fn(ensureRun(s), c)])
+  )
 }
 export const CHANGE_TYPES = Object.keys(CHANGE_APPLY)
 
@@ -542,7 +595,11 @@ export function applyChangeSet(s, proposal, acceptedIds) {
   validateProposal(proposal)
   const accepted = new Set(acceptedIds || [])
   const changes = (proposal.changes || []).filter(c => accepted.has(c.id) && c.status !== 'stale')
-  if (!changes.length) return { applied: 0 }
+  // HYBRID: the running half is applied in the same transaction, from the same accepted set. The
+  // run change ids are their own namespace (`rc1`, …), so filtering them against `accepted`
+  // works the same way — the UI hands back the ids it showed, whichever half they came from.
+  const runChanges = (proposal.runChanges?.changes || []).filter(c => accepted.has(c.id) && c.status !== 'stale')
+  if (!changes.length && !runChanges.length) return { applied: 0 }
 
   pushSnapshot(s, proposal.id, t('Before the Coach’s changes'))
   const applied = []
@@ -550,19 +607,27 @@ export function applyChangeSet(s, proposal, acceptedIds) {
     CHANGE_APPLY[c.type](s, c)
     applied.push(decisionOf(c, 'accepted'))
   }
+  // HYBRID: apply the running changes on the running plan. `ensureRun` creates it on demand so a
+  // profile that somehow receives a run change without a plan gets a plan rather than a crash;
+  // `applyRunChanges` throws part-way through on a bad change, which rolls back the whole set
+  // through the store's clone — exactly the atomicity the strength half already relies on.
+  if (runChanges.length) applyRunChanges(ensureRun(s), runChanges)
   // Turned-down changes keep their before/after too: the chat shows the whole proposal back
   // later, and "you declined something about sets" is not a memory anyone can use.
   const rejected = (proposal.changes || [])
+    .filter(c => !accepted.has(c.id))
+    .map(c => decisionOf(c, c.status === 'stale' ? 'stale' : 'rejected'))
+  const rejectedRun = (proposal.runChanges?.changes || [])
     .filter(c => !accepted.has(c.id))
     .map(c => decisionOf(c, c.status === 'stale' ? 'stale' : 'rejected'))
 
   const logId = appendLog(s, {
     kind: 'review', at: Date.now(), proposalId: proposal.id,
     summary: proposal.summary || '', evidence: proposal.evidence || null,
-    notes: proposal.notes || [], decisions: [...applied, ...rejected]
+    notes: proposal.notes || [], decisions: [...applied, ...rejected, ...rejectedRun]
   })
   coachOf(s).lastReview = { at: Date.now() }
-  return { applied: applied.length, rejected: rejected.length, logId }
+  return { applied: applied.length, runApplied: runChanges.length, rejected: rejected.length + rejectedRun.length, logId }
 }
 
 /** Turned down whole, or expired: recorded so a later review knows not to re-propose it. */
