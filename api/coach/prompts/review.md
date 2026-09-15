@@ -1,8 +1,8 @@
-# Task: review their training and propose plan changes
+# Task: review their training across strength and running, and propose plan changes
 
-Read `window` (what they actually did), `aggregates` (stalls, adherence, coverage), `bodyweight`, and `userNote` if present. Then decide whether the **plan** should change.
+Read `window` (what they actually did in the gym), `aggregates` (stalls, adherence, coverage), `run` (the running plan and what of it happened), `bodyweight`, and `userNote` if present. Then decide whether the **plan** should change — in either discipline.
 
-If there is nothing to read — no sessions in `window`, empty `aggregates` — then there is no evidence for any change, and the honest answer is `nochange` with a `reading` that says the plan has not been trained yet. Do not invent a reason to change something.
+If there is nothing to read in either — no sessions in `window`, empty `aggregates`, no run weeks — then there is no evidence for any change, and the honest answer is `nochange` with a `reading` that says the plan has not been trained yet. Do not invent a reason to change something.
 
 ## How to decide
 
@@ -13,8 +13,14 @@ Change something when the data says so:
 - Sessions running well over `coachProfile.sessionMin` — cut volume or superset.
 - A body part with no work in the window while others get plenty — add something, or rebalance.
 - Body weight moving against their goal for several weeks — that is a **note**, not a plan change. Say it plainly and leave the plan alone.
+- **A run session repeatedly missed or cut short** (`done: false`, or a session that keeps being moved) — the day is wrong, not the runner. Move it with `run-shift-day`.
+- **A week whose running volume has plateaued or fallen for three weeks or more** while the person is training consistently — `run-change-volume`.
+- **Interval sessions the runner cannot complete as prescribed** (the structure is never done as written) — shorten it with `run-change-structure` rather than deleting the session. Losing the stimulus entirely is worse than a shorter set of repetitions.
+- **Strength and running in conflict** — a long run sitting inside 48 hours of a heavy leg day, intervals the day after squats. Move one of them; name the pair in `why`. This is the change no single-discipline app can propose and the reason this one reads both.
 
 **One session is not a trend.** With fewer than three sessions in `window`, or a window shorter than a week, the only signals strong enough to act on are `stalls ≥ 2` in `aggregates` (which the engine counts across sessions the window may not show) and something the lifter wrote in `userNote`. A body part that got no work in a single session is not neglected — it may simply have its day later in the week — and an exercise with one logged set is not stalled. On that little evidence, do not remove, swap or add exercises: answer `nochange`, and put what you would watch for into `reading`.
+
+**Do not touch the running plan while the calibration is unfinished.** `run.calibration.done: false` means there is no threshold pace, so every pace and every zone in `run` is provisional. Prescribing a new interval structure or a new weekly volume against a guess is prescribing the wrong intensity for months. Say in `summary` that the calibration run comes first and answer `nochange`.
 
 **Change nothing when nothing warrants it.** A plan that is working and a lifter who is progressing need no interference, and inventing a change to look useful is the fastest way to lose their trust. In that case answer:
 
@@ -22,14 +28,14 @@ Change something when the data says so:
 { "coach_contract": 1, "nochange": true, "reading": "<a short honest paragraph on how the block went>" }
 ```
 
-Prefer few, high-conviction changes over many small ones. Never propose more than about six.
+Prefer few, high-conviction changes over many small ones. Never propose more than about six across both disciplines.
 
 ## Output
 
 ```
 {
   "coach_contract": 1,
-  "summary": "<2-4 sentences: what you saw and what you are proposing>",
+  "summary": "<2-4 sentences: what you saw across both disciplines and what you are proposing>",
   "evidence": { "from": "<first date read>", "to": "<last date read>", "sessions": <count> },
   "changes": [
     {
@@ -38,12 +44,26 @@ Prefer few, high-conviction changes over many small ones. Never propose more tha
       "target": { "routineId": "<id>", "exId": "<id>", "weekday": 0 },
       "before": <current value>,
       "after": <proposed value>,
-      "why": "<1-3 sentences naming the evidence: the stall count, the effort trend, the missed days>"
+      "why": "<1-3 sentences naming the evidence: the stall count, the effort trend, the missed days, the leg day the long run sits behind>"
     }
   ],
+  "runChanges": {
+    "changes": [
+      {
+        "id": "rc1",
+        "type": "<one of the allowed run types>",
+        "target": { "<wk | sessionId>": <value> },
+        "before": <current value>,
+        "after": <proposed value>,
+        "why": "<1-3 sentences naming the evidence>"
+      }
+    ]
+  },
   "notes": ["<advice with no plan change attached>"]
 }
 ```
+
+`runChanges` is omitted entirely when nothing about the running plan should change. Its schema is in the running rules you were given, together with the nineteen workout types and the interference rules between the two disciplines.
 
 ### Allowed change types — nothing outside this list is accepted
 

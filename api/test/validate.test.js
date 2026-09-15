@@ -15,6 +15,11 @@ import { tempData } from './helpers.mjs';
 
 tempData();
 const { validatePlan, validateReview, CHANGE_TYPES } = await import('../coach/core/validate.js');
+// HYBRID: the running change types are validated by a second export, not by adding them to the
+// strength review — a run change carries no routine, no exercise and no load, so the two lists
+// are allowed to overlap in neither direction.
+const { validateRunChanges, RUN_CHANGE_TYPES } = await import('../coach/run/validate-run.js');
+const RUN_TYPES = RUN_CHANGE_TYPES;
 
 const PLAN = {
   routines: [{
@@ -35,6 +40,45 @@ const PLAN = {
 };
 const change = over => ({ id: 'c1', type: 'sets', target: { routineId: 'r1', exId: '0001' }, before: 3, after: 4, why: 'stalled twice', ...over });
 const review = changes => validateReview({ coach_contract: 1, summary: 's', changes }, PLAN);
+// The running review, with the run namespace and a profile state in scope. `S` is what the
+// interference rules read the leg days out of; without it the run half is validated structurally
+// only, which is not what these fixtures are pinning.
+const runReview = changes => validateRunChanges({ changes }, RUN, { run: RUN, S: S });
+// The run changes below are validated WITH the interference rules in force, because that is how
+// they arrive in production — the strength plan is always in scope. So the fixtures have to sit
+// on legal days: 2026-09-22 is a Tuesday and a leg day, which means no quality run on the 22nd or
+// the 23rd. The dates here were the bug that made this sweep red the first time it ran: a
+// fixture that is arithmetically fine but physiologically illegal is not a well-formed instance.
+
+const RUN = {
+  zones: { thresholdPace: 300, unit: 'km', paceZones: { easy: [345, 390], threshold: [297, 309], interval: [270, 294], repetition: [255, 276], race: [285, 303], max: [285, 300], recovery: [375, 420], marathon: [309, 330] } },
+  calibration: { done: true },
+  // The session ids matter: r_a and r_b are the two the change fixtures point at, and they have
+  // to exist for the validators to resolve their targets. 2026-09-24 is a Thursday — two days
+  // past the Tuesday leg day, and therefore legal for a quality session.
+  weeks: [{
+    wk: 1, phase: 'build', km: 35,
+    sessions: [
+      { id: 'r_a', d: '2026-09-21', type: 'easy', km: 6, structure: null, done: false },
+      { id: 'r_b', d: '2026-09-24', type: 'interval', km: 8, structure: [{ rep: 6, dist: 800, paceZone: 'interval', restSec: 90 }], done: false },
+      { id: 'r_c', d: '2026-09-27', type: 'long', km: 12, structure: null, done: false }
+    ]
+  }],
+  thresholdPace: 300
+};
+// S.run is `run` under a profile state; the run validator takes the run namespace directly.
+const runChange = over => ({ id: 'rc1', type: 'run-change-volume', target: { wk: 1 }, before: 35, after: 38, why: 'volume has been flat for three weeks', ...over });
+
+// A profile state with a strength plan whose Tuesday and Friday are leg days. The run fixtures
+// above are deliberately dated around them — the interference rules are asserted in
+// run-interference.test.js, and these fixtures only need a state to exist.
+const S = {
+  routines: [
+    { id: 'r_legs', name: 'Legs', ex: [{ id: '0043', sets: 4, bp: 'quads' }, { id: '0001', sets: 1, bp: 'chest' }] },
+    { id: 'r_upper', name: 'Upper', ex: [{ id: '0002', sets: 4, bp: 'chest' }] }
+  ],
+  week: { 2: 'r_legs', 5: 'r_legs', 1: 'r_upper' }
+};
 
 /* ---------------- created plans ---------------- */
 
@@ -276,12 +320,51 @@ test('every allowed change type has a validator that accepts a well-formed insta
     'add-routine': change({ type: 'add-routine', target: {}, after: { name: 'C', ex: [{ id: '0001', sets: 3, reps: 10 }] } }),
     'remove-routine': change({ type: 'remove-routine', target: { routineId: 'r2' } }),
     'rename-routine': change({ type: 'rename-routine', target: { routineId: 'r1' }, after: 'Upper' }),
-    week: change({ type: 'week', target: { weekday: 2 }, after: 'r1' })
+    week: change({ type: 'week', target: { weekday: 2 }, after: 'r1' }),
+    // HYBRID: the six running change types. The run half needs a plan to aim at, which is
+    // supplied as ctx below — a run change with no run plan in scope is refused, and these
+    // fixtures exist to prove the validators accept a well-formed instance, not to prove the
+    // context exists. The week is anchored on 2026-09-21 (a Monday) and already holds three
+    // sessions, so the added one needs a day that is both inside the window and free. Saturday
+    // the 26th is that day; the 21st, 24th and 27th are taken, and the leg days (Tuesday 22nd,
+    // Friday 25th) rule out quality work on the 22nd–23rd. An easy run is legal anywhere.
+    'run-add-session': runChange({ type: 'run-add-session', target: { wk: 1 }, after: { d: '2026-09-26', type: 'easy' } }),
+    'run-remove-session': runChange({ type: 'run-remove-session', target: { sessionId: 'r_a' }, after: null }),
+    'run-shift-day': runChange({ type: 'run-shift-day', target: { sessionId: 'r_a' }, before: '2026-09-21', after: '2026-09-23' }),
+    'run-change-structure': runChange({
+      type: 'run-change-structure', target: { sessionId: 'r_b' },
+      before: null, after: [{ rep: 6, dist: 800, paceZone: 'interval', restSec: 90 }]
+    }),
+    'run-change-volume': runChange({ type: 'run-change-volume', target: { wk: 1 }, before: 35, after: 38 }),
+    'run-change-pace-zone': runChange({ type: 'run-change-pace-zone', target: {}, before: 300, after: 303 })
   };
   for (const type of CHANGE_TYPES) {
     assert.ok(good[type], `no fixture for change type "${type}" — add one`);
+  }
+
+  // The strength types go through the strength review, the run types through the run validator
+  // with the running half of the payload in scope. Splitting the loop is the whole point of the
+  // assertion that follows: a run change reaching the strength path is the bug this catches,
+  // and it was a real one during the build.
+  for (const type of CHANGE_TYPES) {
+    if (RUN_TYPES.includes(type)) {
+      const r = runReview([good[type]]);
+      assert.equal(r.ok, true, `${type} should validate: ${JSON.stringify(r.errors)}`);
+    } else {
+      const r = review([good[type]]);
+      assert.equal(r.ok, true, `${type} should validate: ${JSON.stringify(r.errors)}`);
+    }
+  }
+
+  // And each side refuses the other's types: a run type is not a strength change, and the
+  // reverse. This is what keeps the two halves from quietly merging into one list.
+  for (const type of RUN_TYPES) {
     const r = review([good[type]]);
-    assert.equal(r.ok, true, `${type} should validate: ${JSON.stringify(r.errors)}`);
+    assert.equal(r.ok, false, `${type} must not be accepted as a strength change`);
+  }
+  for (const type of CHANGE_TYPES.filter(t => !RUN_TYPES.includes(t))) {
+    const r = runReview([good[type]]);
+    assert.equal(r.ok, false, `${type} must not be accepted as a run change`);
   }
 });
 

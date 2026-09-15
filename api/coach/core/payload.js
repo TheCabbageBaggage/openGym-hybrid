@@ -11,6 +11,9 @@
  * and appearance settings, and every other profile's everything.
  */
 import { LIBRARY, LIB_BY_ID, libraryHas, libraryName, librarySlice, MAX_LIBRARY } from './library.js';
+// HYBRID: the running domain's vocabulary and schema helpers.
+import { WORKOUT_TYPES } from '../run/vocab.js';
+import { cleanRun, daysBetween } from '../run/model.js';
 
 export const CONTRACT = 1;
 // Bounds from FR-22. A review reads a training block, not a training career: more history
@@ -164,6 +167,104 @@ const effortOf = S => {
 /* ---------- window + aggregates ---------- */
 const iso = d => d.toISOString().slice(0, 10);
 
+/* HYBRID: what the running plan asked for against what the running actually did.
+ *
+ * Deliberately the same three questions the strength aggregates answer — was the work done,
+ * is it progressing, is it in conflict with the other discipline — because the review prompt
+ * reads both with the same eyes. `weekKm` is a trend, not a score: a runner in a deload week is
+ * supposed to show a fall, and a prompt that read that as failure would fight the plan it built.
+ *
+ * An ISO date on both sides, and `actual` is the only place a Garmin import writes. When no
+ * activity has been matched, a session the person ticked off by hand still counts as done;
+ * the two are reported separately so a review can tell "did not run" from "did not sync". */
+function runAggregates(S, workouts) {
+  const run = S?.run;
+  if (!run || !Array.isArray(run.weeks) || !run.weeks.length) return {};
+  const today = iso(new Date());
+
+  const weekKm = [];
+  for (const w of run.weeks) {
+    const sessions = Array.isArray(w.sessions) ? w.sessions : [];
+    const planned = Math.round(sessions.reduce((a, s) => a + (Number(s.km) || 0), 0) * 10) / 10;
+    const did = sessions.filter(s => s.done || s.actual);
+    const ran = Math.round(did.reduce((a, s) => a + (Number(s.actual?.distKm) || Number(s.km) || 0), 0) * 10) / 10;
+    weekKm.push({ wk: w.wk, phase: w.phase || null, planned, ran, done: did.length, sessions: sessions.length });
+  }
+
+  const all = run.weeks.flatMap(w => Array.isArray(w.sessions) ? w.sessions : []);
+  const due = all.filter(s => s.d && s.d <= today);
+  const quality = all.filter(s => WORKOUT_TYPES[s.type]?.quality);
+  const qualityKm = quality.reduce((a, s) => a + (Number(s.km) || 0), 0);
+  const totalKm = all.reduce((a, s) => a + (Number(s.km) || 0), 0);
+
+  // Pace trend from the sessions that were actually run, oldest first — the Coach reads the
+  // direction, not the numbers, and a runner whose easy pace is falling at a fixed heart rate
+  // is the clearest evidence a block is working that running data ever gives.
+  const paceTrend = all
+    .filter(s => s.actual && Number(s.actual.avgPaceSec) > 0 && s.d)
+    .sort((a, b) => String(a.d).localeCompare(String(b.d)))
+    .slice(-20)
+    .map(s => ({ d: s.d, type: s.type, paceSec: Math.round(s.actual.avgPaceSec) }));
+
+  /* The interference signal, and the reason this feature exists: for each long run and each
+   * interval day, how many days away the nearest leg-heavy strength session is. The app refuses
+   * a plan that breaks the 48-hour rule; this is how a review sees a plan that has drifted out
+   * of shape since it was built (the lifter moved a day by hand, or moved three).
+   *
+   * "Leg-heavy" is read off the strength plan rather than guessed from workout names — a
+   * routine is leg-heavy when half its work sets are on the legs. */
+  const legDays = heavyLegDays(S);
+  const proximity = [];
+  if (legDays.size) {
+    for (const s of all) {
+      if (s.type !== 'long' && !WORKOUT_TYPES[s.type]?.quality) continue;
+      if (!s.d) continue;
+      let nearest = null;
+      for (const d of legDays) {
+        const gap = Math.abs(daysBetween(d, s.d));
+        if (nearest == null || gap < nearest) nearest = gap;
+      }
+      if (nearest != null && nearest < 2) proximity.push({ d: s.d, type: s.type, daysFromLegDay: nearest });
+    }
+  }
+
+  return {
+    run: {
+      calibrated: !!run.zones?.thresholdPace && !!run.calibration?.done,
+      thresholdPace: run.zones?.thresholdPace || null,
+      unit: run.zones?.unit || 'km',
+      sessionsPlanned: all.length,
+      sessionsDue: due.length,
+      sessionsDone: due.filter(s => s.done || s.actual).length,
+      compliancePct: due.length ? Math.round(due.filter(s => s.done || s.actual).length / due.length * 100) : null,
+      totalKm: Math.round(totalKm * 10) / 10,
+      qualityShare: totalKm ? Math.round(qualityKm / totalKm * 1000) / 1000 : null,
+      weekKm,
+      paceTrend,
+      legDayProximity: proximity
+    }
+  };
+}
+
+const LEG_BODY_PARTS = new Set(['legs', 'quads', 'hamstrings', 'glutes', 'calves']);
+
+/** The dates this person trains legs heavily, from the plan's own routine definitions. */
+function heavyLegDays(S) {
+  const out = new Set();
+  const byId = new Map((S.routines || []).map(r => [r.id, r]));
+  for (const [weekday, ids] of Object.entries(S.week || {})) {
+    for (const rid of [].concat(ids || [])) {
+      const r = byId.get(rid);
+      if (!r) continue;
+      const ex = (r.ex || []).filter(e => LIB_BY_ID.get(e.id));
+      if (!ex.length) continue;
+      const legs = ex.filter(e => LEG_BODY_PARTS.has(LIB_BY_ID.get(e.id)?.bp)).length;
+      if (legs / ex.length >= 0.5) out.add(Number(weekday));
+    }
+  }
+  return new Set([...out].map(wd => wd));   // weekday numbers; callers compare against a session date's own weekday
+}
+
 export function reviewWindow(S, since) {
   const all = (S.workouts || []).filter(w => w && w.d);
   const cutoffDate = new Date(); cutoffDate.setDate(cutoffDate.getDate() - MAX_WEEKS * 7);
@@ -212,13 +313,17 @@ function aggregates(S, workouts) {
     setsByBodyPart: hit,
     sessionMinutes: durations.length
       ? { median: durations.slice().sort((a, b) => a - b)[Math.floor(durations.length / 2)], min: Math.min(...durations), max: Math.max(...durations) }
-      : null
+      : null,
+    // HYBRID: the running half of the same picture, so one review can read both disciplines.
+    // Read through the run module rather than inline: the arithmetic here (80/20, the leg-day
+    // distance) is the same arithmetic plan.js uses to build the plan, and two copies of it
+    // would be two answers to "how hard was last week" by the time anyone compared them.
+    ...runAggregates(S, workouts)
   };
 }
 
 /** Every exercise id the plan names or the given workouts logged — the ones a proposal has to
- *  be able to refer to, so they ride in the library slice whatever the cap or the filter. */
-function trainedIds(S, workouts) {
+ *  be able to refer to, so they ride in the library slice whatever the cap or the filter. */function trainedIds(S, workouts) {
   const ids = new Set();
   (S.routines || []).forEach(r => (r.ex || []).forEach(e => ids.add(e.id)));
   (workouts || []).forEach(w => (w.entries || []).forEach(en => ids.add(en.id)));
@@ -356,6 +461,10 @@ export function build(S, opts = {}) {
     } : null,
     plan: cleanPlan(S)
   };
+  // HYBRID: the running half of the profile. Absent for anyone who does not run, which is what
+  // keeps the payload, the prompt and the token bill unchanged for a strength-only instance.
+  const run = cleanRun(S, { maxWeeks: MAX_WEEKS });
+  if (run && (run.weeks.length || run.thresholdPace)) p.run = run;
 
   // What the user already turned down, so the Coach does not re-propose it without new
   // evidence (FR-26). Summaries only — the log's full before/after stays on the device.

@@ -14,9 +14,18 @@ export const taskOf = (kind, payload) =>
  * re-processed, which on a CPU box is most of the wall time. Cloud providers get the same
  * split as system/user messages (and Anthropic caches the system block explicitly).
  */
+// HYBRID: the running rules ride alongside common.md whenever the profile actually runs.
+//
+// Gated on the payload rather than always appended, for two reasons that both matter: a
+// profile with no running in its state pays no tokens for a hundred lines about pace zones, and
+// the prefix cache keeps working for every strength-only job (the system block is byte-identical
+// across jobs of the same task, which is the property buildPromptParts exists to preserve).
+const runsIn = payload => !!payload && (payload.run != null || payload.coachProfile?.running != null);
+
 export function buildPromptParts(kind, payload, repair) {
   const task = taskOf(kind, payload);
-  const system = PROMPTS.common + '\n\n---\n\n' + PROMPTS[task];
+  const system = PROMPTS.common + '\n\n---\n\n' + PROMPTS[task]
+    + (runsIn(payload) ? '\n\n---\n\n' + PROMPTS.hybrid : '');
   // Compact JSON, not pretty-printed: the indentation was ~30% of the payload's tokens and
   // a model reads either just as well.
   let user = '## Payload\n\n```json\n' + JSON.stringify(payload) + '\n```\n';

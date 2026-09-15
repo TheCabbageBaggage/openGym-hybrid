@@ -24,7 +24,11 @@ export const CHANGE_TYPES = [
   'reorder', 'superset',
   'routine-prog', 'exercise-prog', 'inc',
   'add-routine', 'remove-routine', 'rename-routine',
-  'week'
+  'week',
+  // HYBRID: the six running change types, appended as one contiguous block so a rebase finds
+  // them together. Adding them here is deliberate — this list is the security boundary (see the
+  // note above the review validator), and a running change that is not in it cannot reach a plan.
+  ...RUN_CHANGE_TYPES
 ];
 const POLICIES = ['off', 'linear', 'greyskull', 'double', 'time'];
 const MODES = ['reps', 'time', 'cardio'];
@@ -41,6 +45,9 @@ const safeId = v => isStr(v) && !RESERVED_IDS.includes(v);
 const MAX_CHANGES = 25;
 const MAX_ROUTINES = 7;
 const MAX_EX_PER_ROUTINE = 20;
+
+import { RUN_CHANGE_TYPES, validateRunChanges } from '../run/validate-run.js';
+import { WORKOUT_TYPES } from '../run/vocab.js';
 
 const isStr = v => typeof v === 'string' && v.trim().length > 0;
 const isNum = v => typeof v === 'number' && Number.isFinite(v);
@@ -192,6 +199,12 @@ export function validatePlan(data, ctx = {}) {
   }
 
   if (errors.length) return fail(errors);
+  // HYBRID: a running plan is optional and travels beside the strength bundle. Validating it
+  // here rather than in a separate pass keeps a single answer's two halves atomic — a proposal
+  // with a good week and a nonsensical run block is refused as a whole, so nobody ever approves
+  // half of what they were shown.
+  const runPlan = data.runPlan == null ? null : validateRunPlanShape(data.runPlan, errors);
+  if (errors.length) return fail(errors);
   return {
     ok: true,
     bundle: {
@@ -199,8 +212,59 @@ export function validatePlan(data, ctx = {}) {
       name: clampStr(data.name || 'Coach plan', 40),
       summary: clampStr(data.summary || '', 1200),
       basedOn: clampStr(data.basedOn || '', 400),
-      week, routines, customEx
+      week, routines, customEx,
+      ...(runPlan ? { runPlan } : {})
     }
+  };
+}
+
+/* HYBRID: the running block of a created plan — the shape, not the arithmetic.
+ *
+ * The model answers with a week *shape* (which weekday, which workout type, how much volume) and
+ * the app expands it into paced sessions with repetitions and a progression curve. That split is
+ * deliberate: the arithmetic is deterministic, testable and already written (run/plan.js), and a
+ * model asked to produce nine weeks of paced sessions produces nine weeks of plausible-looking
+ * numbers that no one can check. The model is asked for the judgement; the app does the sums. */
+function validateRunPlanShape(rp, errors) {
+  if (!rp || typeof rp !== 'object') { errors.push('runPlan must be an object or null'); return null; }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(rp.startDate))) errors.push('runPlan.startDate must be an ISO date');
+  if (!isInt(rp.weeks, 1, 52)) errors.push('runPlan.weeks must be 1-52');
+  if (rp.unit != null && !['km', 'mi'].includes(rp.unit)) errors.push('runPlan.unit must be km or mi');
+  if (rp.volumeStart != null && (!isNum(rp.volumeStart) || rp.volumeStart <= 0 || rp.volumeStart > 300)) {
+    errors.push('runPlan.volumeStart must be 1-300 kilometres');
+  }
+  const slots = Array.isArray(rp.slots) ? rp.slots : null;
+  if (!slots || !slots.length) errors.push('runPlan.slots must be a non-empty array of running days');
+  else {
+    if (slots.length > 7) errors.push('runPlan.slots holds more than seven days');
+    const seen = new Set();
+    slots.forEach((s, i) => {
+      const where = `runPlan.slots[${i}]`;
+      if (!s || typeof s !== 'object') { errors.push(`${where} is not an object`); return; }
+      if (!isInt(s.weekday, 0, 6)) errors.push(`${where}.weekday must be 0-6 (0 = Sunday)`);
+      else if (seen.has(s.weekday)) errors.push(`${where}.weekday ${s.weekday} is used twice — one running day per weekday`);
+      else seen.add(s.weekday);
+      // An explicit `rest` slot is refused rather than ignored: the model that answers "no run
+      // on Wednesday, type rest" has misunderstood the shape, and silently dropping it would
+      // hide that on the screen where the person is checking the plan.
+      if (s.type === 'rest') { errors.push(`${where}.type "rest" is not a running day — leave the weekday out of slots instead`); return; }
+      if (!WORKOUT_TYPES[s.type]) errors.push(`${where}.type "${s.type}" is not a workout type`);
+    });
+  }
+  if (rp.race != null) {
+    if (typeof rp.race !== 'object' || !/^\d{4}-\d{2}-\d{2}$/.test(String(rp.race.d))) errors.push('runPlan.race.d must be an ISO date');
+    else if (!isNum(rp.race.distanceKm) || rp.race.distanceKm <= 0 || rp.race.distanceKm > 200) errors.push('runPlan.race.distanceKm must be 1-200');
+  }
+  if (errors.length) return null;
+  return {
+    startDate: rp.startDate,
+    weeks: rp.weeks,
+    unit: rp.unit === 'mi' ? 'mi' : 'km',
+    calibration: rp.calibration !== false,
+    slots: slots.map(s => ({ weekday: s.weekday, type: s.type })),
+    volumeStart: isNum(rp.volumeStart) ? Math.round(rp.volumeStart) : null,
+    race: rp.race ? { d: rp.race.d, distanceKm: Math.round(rp.race.distanceKm), ...(isStr(rp.race.name) ? { name: clampStr(rp.race.name, 60) } : {}) } : null,
+    why: clampStr(rp.why || '', 600)
   };
 }
 
@@ -492,6 +556,28 @@ export function validateReview(data, plan, ctx = {}) {
     // rather than showing someone an empty proposal screen (FR-25).
     return { ok: true, nochange: true, reading: clampStr(data.summary || data.reading || '', 1200) };
   }
+  /* ----- HYBRID: the running half of the same answer -----
+   *
+   * A review may carry both. It is validated *after* the strength half so a run change is never
+   * judged against a plan that the same answer is already rewriting, and it is validated with
+   * `ctx.S` (the profile state) so the interference rules can see the leg days. A failure here
+   * fails the whole review — an answer that adjusts Thursday's intervals and then has its run
+   * half thrown away is an answer nobody read the warning on.
+   *
+   * `runChanges` is optional: absent means "nothing about the running plan changes", which is
+   * the normal answer for anyone who does not run. */
+  let runProposal = null;
+  if (data.runChanges != null) {
+    if (!ctx.run) {
+      errors.push('runChanges was proposed but this profile has no running plan — prescribe running through a created plan first');
+    } else {
+      const rr = validateRunChanges(data.runChanges, ctx.run, { S: ctx.S, plan });
+      if (!rr.ok) errors.push(...rr.errors.map(e => `runChanges: ${e}`));
+      else if (!rr.nochange) runProposal = rr.proposal;
+    }
+  }
+  if (errors.length) return fail(errors);
+
   return {
     ok: true,
     proposal: {
@@ -505,6 +591,9 @@ export function validateReview(data, plan, ctx = {}) {
         sessions: isInt(data.evidence?.sessions, 0, 10000) ? data.evidence.sessions : null
       },
       changes: kept,
+      // HYBRID: present only when the answer proposed running changes. The client applies it
+      // through applyRunChanges, and reverts it with the same snapshot as the strength half.
+      ...(runProposal ? { runChanges: runProposal } : {}),
       notes: (Array.isArray(data.notes) ? data.notes : []).filter(isStr).slice(0, 6).map(n => clampStr(n, 600))
     }
   };
