@@ -19,6 +19,10 @@ COPY frontend/package.json frontend/package-lock.json* ./
 # timed out on the shared runners — a lockfile-ignoring `npm install` fallback is no answer to that.
 RUN npm ci --ignore-scripts
 COPY api/coach/core/ /app/api/coach/core/
+# HYBRID: the running coach lives in api/coach/run and is imported by core/ (payload.js,
+# validate.js) for the hybrid plan. Copy it alongside core so the client parity imports — which
+# pull core/* into the bundle — resolve the run/* modules they now transitively need.
+COPY api/coach/run/ /app/api/coach/run/
 COPY frontend/ ./
 RUN npm run build
 
