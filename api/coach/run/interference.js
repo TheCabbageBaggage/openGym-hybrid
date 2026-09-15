@@ -33,7 +33,13 @@ import { strengthOn, daysBetween } from './model.js';
 // The group list is deliberately the hip-and-knee chain. Calves count (they are load-bearing on
 // every run) and glutes count (they are the engine of the stride). `lower back` does not: it is
 // a deadlift day's *fatigue* but it is not what a long run is competing with.
-export const LEG_GROUPS = ['quads', 'hamstrings', 'glutes', 'calves', 'legs'];
+//
+// The strings are the exercise library's own `bp` values, not invented group names. That is not
+// cosmetic: the library ships `"upper legs"` and `"lower legs"`, so a list written as
+// `['quads','hamstrings','glutes','calves']` matches *nothing* and every routine reports as a
+// non-leg day. The feature then looks implemented and silently never blocks a single plan.
+// `run-interference.test.js` pins these against the shipped library so the mismatch cannot return.
+export const LEG_GROUPS = ['upper legs', 'lower legs'];
 export const LEG_SHARE_THRESHOLD = 0.5;
 
 /**

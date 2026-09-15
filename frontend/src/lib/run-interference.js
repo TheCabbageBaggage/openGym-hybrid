@@ -16,7 +16,7 @@
 import { routinesOn, daysBetween, strengthOn } from './run-model.js'
 
 /** The muscle groups that make a day a leg day. */
-export const LEG_GROUPS = ['quads', 'hamstrings', 'glutes', 'calves', 'legs']
+export const LEG_GROUPS = ['upper legs', 'lower legs']
 
 /** Half the working sets. Linus's number — a routine is a leg day when legs are most of it. */
 export const LEG_SHARE_THRESHOLD = 0.5

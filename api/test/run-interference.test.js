@@ -11,37 +11,67 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { isLegDay, legDays, checkWeek, checkPlan, legVolumeMultiplier, proximity, addDays, LEG_SHARE_THRESHOLD } = await import('../coach/run/interference.js');
+const { isLegDay, legDays, checkWeek, checkPlan, legVolumeMultiplier, proximity, addDays, LEG_SHARE_THRESHOLD, LEG_GROUPS } = await import('../coach/run/interference.js');
 
 /* ---------- what counts as a leg day ---------- */
 
 test('a routine is a leg day at half its working sets, not at half its exercises', () => {
-  // 4 sets of quads against 1 set of chest: 80 % of the work is legs, and an exercise count
+  // 4 sets of legs against 1 set of chest: 80 % of the work is legs, and an exercise count
   // would have called this "half leg" and then argued about it. No `bp` field, so the body
   // part comes from the injected library lookup.
-  assert.equal(isLegDay({ id: 'a', ex: [{ id: 'q', sets: 4 }, { id: 'c', sets: 1 }] }, id => (id === 'q' ? 'quads' : 'chest')), true);
+  assert.equal(isLegDay({ id: 'a', ex: [{ id: 'q', sets: 4 }, { id: 'c', sets: 1 }] }, id => (id === 'q' ? 'upper legs' : 'chest')), true);
   // Three exercises, four leg sets and four chest sets: exactly at the threshold, and the rule
   // is "at least half" — a dead-even routine is a leg day.
   assert.equal(isLegDay({
     id: 'b',
-    ex: [{ id: 'q', sets: 4, bp: 'quads' }, { id: 'c', sets: 4, bp: 'chest' }]
+    ex: [{ id: 'q', sets: 4, bp: 'upper legs' }, { id: 'c', sets: 4, bp: 'chest' }]
   }), true);
   // Just under: 3 leg sets to 4 upper. Not a leg day, and this is the boundary the threshold
   // exists for — a routine with a couple of leg accessories does not cost a long run.
   assert.equal(isLegDay({
     id: 'c',
-    ex: [{ id: 'q', sets: 3, bp: 'hamstrings' }, { id: 'c', sets: 4, bp: 'back' }]
+    ex: [{ id: 'q', sets: 3, bp: 'lower legs' }, { id: 'c', sets: 4, bp: 'back' }]
   }), false);
   assert.equal(LEG_SHARE_THRESHOLD, 0.5);
 });
 
+/* The regression guard for the bug that made this whole engine a no-op.
+ *
+ * `LEG_GROUPS` was written as ['quads','hamstrings','glutes','calves','legs'] — plausible names
+ * that appear nowhere in the exercise library, which ships "upper legs" and "lower legs". Every
+ * routine therefore scored zero leg work, `isLegDay` returned false for an obvious squat day,
+ * and the blocking rules Linus asked for blocked nothing. Nothing failed, because the tests used
+ * the same invented strings as the code.
+ *
+ * This test reads the real library, so the two can never drift apart again. */
+test('LEG_GROUPS matches the shipped library exactly', async () => {
+  const { LIBRARY } = await import('../coach/core/library.js');
+  const real = new Set(LIBRARY.map(e => e.bp));
+  for (const g of LEG_GROUPS) {
+    assert.ok(real.has(g), `LEG_GROUPS contains ${JSON.stringify(g)}, which is not a body part in the exercise library`);
+  }
+  // And the negative: the library's own leg categories must all be covered, or a leg day built
+  // from calf work alone would slip through the rule.
+  for (const bp of real) {
+    if (/leg/i.test(bp)) assert.ok(LEG_GROUPS.includes(bp), `library body part ${JSON.stringify(bp)} looks like legs but is not in LEG_GROUPS`);
+  }
+});
+
+test('a real squat routine from the shipped library is detected as a leg day', async () => {
+  const { LIB_BY_ID, LIBRARY } = await import('../coach/core/library.js');
+  const squat = LIBRARY.find(e => e.bp === 'upper legs' && /barbell bench squat/.test(e.n));
+  assert.ok(squat, 'the library still has a barbell squat');
+  const routine = { id: 'legs', name: 'Leg day', ex: [{ id: squat.id, sets: 4 }] };
+  assert.equal(isLegDay(routine, id => LIB_BY_ID.get(id)?.bp), true, 'a squat-only routine is a leg day');
+});
+
 test('every group in the hip-and-knee chain counts, and the lower back does not', () => {
-  for (const bp of ['quads', 'hamstrings', 'glutes', 'calves', 'legs']) {
+  for (const bp of ['upper legs', 'lower legs']) {
     assert.equal(isLegDay({ ex: [{ id: 'x', sets: 3, bp }] }), true, `${bp} is leg work`);
   }
   // A deadlift day fatigues the lower back, which is why it is hard — but a long run is not
   // competing with a spinal erector the way it competes with a quadriceps.
-  assert.equal(isLegDay({ ex: [{ id: 'x', sets: 4, bp: 'back' }, { id: 'y', sets: 1, bp: 'calves' }] }), false);
+  assert.equal(isLegDay({ ex: [{ id: 'x', sets: 4, bp: 'back' }, { id: 'y', sets: 1, bp: 'lower legs' }] }), false);
   // An empty routine is not a leg day. Zero sets is not a heavy day, and returning true here
   // would make every unedited routine block the calendar.
   assert.equal(isLegDay({ ex: [] }), false);
@@ -50,7 +80,7 @@ test('every group in the hip-and-knee chain counts, and the lower back does not'
 
 test('leg days come out of the strength plan as dates', () => {
   const S = {
-    routines: [{ id: 'legs', ex: [{ id: 'q', sets: 4, bp: 'quads' }] }],
+    routines: [{ id: 'legs', ex: [{ id: 'q', sets: 4, bp: 'upper legs' }] }],
     // 2026-09-22 is a Tuesday, 2026-09-25 a Friday.
     week: { 2: 'legs', 5: 'legs', 4: 'legs' }
   };
@@ -61,7 +91,7 @@ test('leg days come out of the strength plan as dates', () => {
 test('a day with two routines is a leg day if either of them is', () => {
   const S = {
     routines: [
-      { id: 'legs', ex: [{ id: 'q', sets: 5, bp: 'quads' }] },
+      { id: 'legs', ex: [{ id: 'q', sets: 5, bp: 'upper legs' }] },
       { id: 'upper', ex: [{ id: 'c', sets: 5, bp: 'chest' }] }
     ],
     week: { 2: ['upper', 'legs'] }
@@ -166,7 +196,7 @@ const RUN = {
   ]
 };
 const S_PLAN = {
-  routines: [{ id: 'legs', ex: [{ id: 'q', sets: 4, bp: 'quads' }] }],
+  routines: [{ id: 'legs', ex: [{ id: 'q', sets: 4, bp: 'upper legs' }] }],
   week: { 2: 'legs' }
 };
 

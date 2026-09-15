@@ -13,7 +13,7 @@
 import { LIBRARY, LIB_BY_ID, libraryHas, libraryName, librarySlice, MAX_LIBRARY } from './library.js';
 // HYBRID: the running domain's vocabulary and schema helpers.
 import { WORKOUT_TYPES } from '../run/vocab.js';
-import { cleanRun, daysBetween } from '../run/model.js';
+import { cleanRun } from '../run/model.js';
 
 export const CONTRACT = 1;
 // Bounds from FR-22. A review reads a training block, not a training career: more history
@@ -213,17 +213,13 @@ function runAggregates(S, workouts) {
    *
    * "Leg-heavy" is read off the strength plan rather than guessed from workout names — a
    * routine is leg-heavy when half its work sets are on the legs. */
-  const legDays = heavyLegDays(S);
+  const legWeekdays = heavyLegWeekdays(S);
   const proximity = [];
-  if (legDays.size) {
+  if (legWeekdays.size) {
     for (const s of all) {
       if (s.type !== 'long' && !WORKOUT_TYPES[s.type]?.quality) continue;
       if (!s.d) continue;
-      let nearest = null;
-      for (const d of legDays) {
-        const gap = Math.abs(daysBetween(d, s.d));
-        if (nearest == null || gap < nearest) nearest = gap;
-      }
+      const nearest = nearestLegDayGap(legWeekdays, s.d);
       if (nearest != null && nearest < 2) proximity.push({ d: s.d, type: s.type, daysFromLegDay: nearest });
     }
   }
@@ -241,15 +237,26 @@ function runAggregates(S, workouts) {
       qualityShare: totalKm ? Math.round(qualityKm / totalKm * 1000) / 1000 : null,
       weekKm,
       paceTrend,
-      legDayProximity: proximity
+      legDayProximity: proximity,
+      legVolumeConflicts: legVolumeConflict(S, run.weeks),
+      legDayWeekdays: [...legWeekdays].sort((a, b) => a - b)
     }
   };
 }
 
-const LEG_BODY_PARTS = new Set(['legs', 'quads', 'hamstrings', 'glutes', 'calves']);
+// The strings are the exercise library's own `bp` values. The library ships "upper legs" and
+// "lower legs"; a list written as ['quads','hamstrings',...] matches nothing at all and the
+// detector silently reports every routine as a non-leg day. Pinned by tests on both sides.
+const LEG_BODY_PARTS = new Set(['upper legs', 'lower legs']);
 
-/** The dates this person trains legs heavily, from the plan's own routine definitions. */
-function heavyLegDays(S) {
+/* HYBRID: the weekday numbers this person trains legs heavily, from the plan's own routine
+ * definitions. A routine counts as leg-heavy when half its work sets are on the legs — read off
+ * the exercise library's body part, not guessed from routine or exercise names, so the answer
+ * stays right when the plan is renamed or rebuilt.
+ *
+ * Returns weekday numbers (0=Sun), not dates: `S.week` is a recurring weekly pattern, so it has
+ * no dates of its own. Callers place them on the calendar. */
+function heavyLegWeekdays(S) {
   const out = new Set();
   const byId = new Map((S.routines || []).map(r => [r.id, r]));
   for (const [weekday, ids] of Object.entries(S.week || {})) {
@@ -262,7 +269,37 @@ function heavyLegDays(S) {
       if (legs / ex.length >= 0.5) out.add(Number(weekday));
     }
   }
-  return new Set([...out].map(wd => wd));   // weekday numbers; callers compare against a session date's own weekday
+  return out;
+}
+
+/** The ISO date of the nearest heavy leg day before, on, or after `d` — or null when unknown.
+ *  `S.week` is a weekly pattern, so the leg days repeat every 7 days; measuring against the
+ *  nearest occurrence in either direction is what the 48-hour rule actually means. */
+function nearestLegDayGap(weekdays, d) {
+  if (!weekdays.size || !d) return null;
+  const on = new Date(d + 'T00:00:00Z').getUTCDay();
+  let best = null;
+  for (const wd of weekdays) {
+    // Signed distance to the most recent occurrence, then to the next one; take the smaller.
+    const back = (on - wd + 7) % 7;
+    const fwd = (wd - on + 7) % 7;
+    const gap = Math.min(back, fwd);
+    if (best == null || gap < best) best = gap;
+  }
+  return best;
+}
+
+/* The leg-volume cap the spec calls for: when a week carries two or more quality runs, the leg
+ * work in the strength plan is meant to come down (x0.75) so the two disciplines do not both
+ * push the same tissue. This reports the conflict; the review proposes the fix. */
+function legVolumeConflict(S, weeks) {
+  const out = [];
+  for (const w of weeks) {
+    const sessions = Array.isArray(w.sessions) ? w.sessions : [];
+    const quality = sessions.filter(s => WORKOUT_TYPES[s.type]?.quality).length;
+    if (quality >= 2) out.push({ wk: w.wk, qualityRuns: quality, legVolumeScale: 0.75 });
+  }
+  return out;
 }
 
 export function reviewWindow(S, since) {

@@ -15,7 +15,9 @@ const PUSH = { id: 'push', name: 'Push', ex: [
 /** Half legs exactly — the boundary the threshold is defined on. */
 const HALF = { id: 'half', name: 'Half', ex: [{ id: 'squat', sets: 3 }, { id: 'bench', sets: 3 }] }
 
-const bp = id => (['squat', 'rdl', 'calf'].includes(id) ? 'quads' : 'chest')
+// The client mirror's LEG_GROUPS are the exercise library's own `bp` values ("upper legs",
+// "lower legs"). This lookup mirrors that; a name like 'quads' would match nothing.
+const bp = id => (['squat', 'rdl', 'calf'].includes(id) ? 'upper legs' : 'chest')
 
 describe('isLegDay', () => {
   it('calls a mostly-legs routine a leg day', () => {
