@@ -38,6 +38,8 @@ import Admin from './views/Admin.jsx'
 import CoachChat from './views/CoachChat.jsx'
 import CoachIntake from './views/CoachIntake.jsx'
 import CoachSetup from './views/CoachSetup.jsx'
+import Run from './views/Run.jsx'
+import RunWorkout from './views/RunWorkout.jsx'
 
 // last known scrollY per route, so back-navigation can put the page where it was
 const scrollPositions = new Map()
@@ -155,6 +157,11 @@ function Shell() {
               <Route path="/coach/intake" element={<CoachIntake />} />
               <Route path="/coach/proposal" element={<Navigate to="/coach" replace />} />
               <Route path="/coach/setup" element={<CoachSetup />} />
+              {/* HYBRID: the running half of a hybrid plan. The route exists unconditionally
+                  like the Coach screens, but the view returns null for a strength-only profile
+                  so no tab or card appears for someone who does not run. */}
+              <Route path="/run" element={<Run />} />
+              <Route path="/run/:id" element={<RunWorkout />} />
               <Route path="/admin" element={user?.admin ? <Admin /> : <Navigate to="/home" replace />} />
               <Route path="*" element={<Navigate to="/home" replace />} />
             </Routes>

@@ -10,6 +10,7 @@ import { glyphOf, DEFAULT_GLYPH } from '../lib/glyphs.js'
 import { DEMO } from '../lib/demo.js'
 import { MOBILE } from '../lib/mobile.js'
 import { coachAvailable } from '../lib/coach.js'
+import { hasRun } from '../lib/run-model.js'
 
 export default function Plan() {
   const nav = useNavigate()
@@ -47,6 +48,17 @@ export default function Plan() {
       <span className="coach-cta-t">
         <b>{t('Coach')}</b>
         <span>{t('Plan design and reviews, from your own training')}</span>
+      </span>
+      <Icon name="chevronRight" className="coach-cta-chev" />
+    </button>}
+
+    {/* HYBRID: the running half, shown only for a profile that runs. Same CTA shape as the Coach,
+        so a hybrid plan reads as one plan with two halves rather than two apps bolted together. */}
+    {hasRun(S) && <button className="coach-cta" onClick={() => nav('/run')}>
+      <span className="coach-cta-av"><Icon name="figureRun" /></span>
+      <span className="coach-cta-t">
+        <b>{t('Running')}</b>
+        <span>{t('Your running week, paced from your threshold')}</span>
       </span>
       <Icon name="chevronRight" className="coach-cta-chev" />
     </button>}

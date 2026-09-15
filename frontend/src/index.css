@@ -1274,3 +1274,13 @@ body.chips-dragging *{cursor:inherit}
 .coach-cta-t b{font-size:17px;font-weight:600;letter-spacing:-.015em;color:var(--label)}
 .coach-cta-t span{font-size:13px;color:var(--label-2);line-height:1.35}
 .coach-cta-chev{color:var(--acc);font-size:15px;flex:none}
+
+/* ------------------------------------------------------- hybrid running -- */
+/* HYBRID: the running plan's presentation. Additive — a strength-only profile never
+   renders these, and the selectors are namespaced under .run- so a rebase cannot clash. */
+.run-session.done .tt{color:var(--label-2)}
+.run-session.done .tt{text-decoration:line-through;text-decoration-color:var(--label-3)}
+.run-session.late .ss{color:var(--red)}
+.run-done{width:36px;height:36px;flex:none;border-radius:10px;display:grid;place-items:center;
+  background:var(--surface-2);color:var(--label-3);font-size:16px}
+.run-done.on{background:color-mix(in srgb,var(--acc) 16%,transparent);color:var(--acc)}
